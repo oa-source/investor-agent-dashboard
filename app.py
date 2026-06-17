@@ -526,24 +526,27 @@ with tab1:
     c1, c2, c3, c4 = st.columns(4)
 
     with c1:
-        sub_strategy = st.selectbox(
+        sub_strategy = st.multiselect(
             "Sub Strategy",
-            ["All"] + sorted(df["sub_strategy"].dropna().unique()),
-            key="fund_screener_sub_strategy"
+            sorted(df["sub_strategy"].dropna().unique()),
+            key="fund_screener_sub_strategy",
+            placeholder="All"
         )
 
     with c2:
-        geography = st.selectbox(
+        geography = st.multiselect(
             "Geography",
-            ["All"] + sorted(df["geography"].dropna().unique()),
-            key="fund_screener_geography"
+            sorted(df["geography"].dropna().unique()),
+            key="fund_screener_geography",
+            placeholder="All"
         )
 
     with c3:
-        vintage_filter = st.selectbox(
+        vintage_filter = st.multiselect(
             "Vintage",
-            ["All"] + sorted(df["vintage_year"].dropna().astype(int).unique(), reverse=True),
-            key="fund_screener_vintage"
+            sorted(df["vintage_year"].dropna().astype(int).unique(), reverse=True),
+            key="fund_screener_vintage",
+            placeholder="All"
         )
 
     with c4:
@@ -578,14 +581,14 @@ with tab1:
     if hide_suspect:
         filtered = filtered[filtered["suspect_data"] == False]
 
-    if sub_strategy != "All":
-        filtered = filtered[filtered["sub_strategy"] == sub_strategy]
+    if isinstance(sub_strategy, list) and len(sub_strategy) > 0:
+        filtered = filtered[filtered["sub_strategy"].isin(sub_strategy)]
 
-    if geography != "All":
-        filtered = filtered[filtered["geography"] == geography]
+    if isinstance(geography, list) and len(geography) > 0:
+        filtered = filtered[filtered["geography"].isin(geography)]
 
-    if vintage_filter != "All":
-        filtered = filtered[filtered["vintage_year"] == vintage_filter]
+    if isinstance(vintage_filter, list) and len(vintage_filter) > 0:
+        filtered = filtered[filtered["vintage_year"].isin(vintage_filter)]
 
     if quartile_filter != "All":
         filtered = filtered[filtered["overall_quartile"] == quartile_filter]
@@ -2321,4 +2324,362 @@ else:
 # END BOTTOM FUND QUARTERLY HISTORY CHARTS
 # ============================================================
 
+
+
+# ============================================================
+# PDF UPLOAD / DATA EXTRACTION TOOL
+# Safe mode: extracts into existing database columns only.
+# ============================================================
+
+import re as _pdf_re
+import hashlib as _pdf_hashlib
+import pandas as _pdf_pd
+from pathlib import Path as _PdfPath
+
+st.divider()
+st.markdown("## Upload PDF to Extract Fund Data")
+st.caption(
+    "Drag a PDF here. The app will extract possible fund rows, map them into existing dashboard columns only, "
+    "and show a preview before anything is added."
+)
+
+_ALLOWED_MAIN_COLUMNS = [
+    "fund_id",
+    "fund_name",
+    "manager_id",
+    "manager_name",
+    "vintage_year",
+    "strategy",
+    "sub_strategy",
+    "geography",
+    "status",
+    "final_close_size_usd",
+    "lp_count",
+    "gross_asset_value_usd",
+    "total_amount_sold_usd",
+    "irr_min",
+    "irr_max",
+    "tvpi_min",
+    "tvpi_max",
+    "dpi_min",
+    "dpi_max",
+    "latest_as_of_date",
+    "report_evidence_count",
+    "best_report_confidence",
+    "best_report_evidence_score",
+    "report_sources",
+    "report_urls",
+    "report_mentions",
+    "irr_percent_for_vintage",
+    "irr_vintage_percentile",
+    "tvpi_vintage_percentile",
+    "dpi_vintage_percentile",
+    "irr_vintage_quartile",
+    "tvpi_vintage_quartile",
+    "dpi_vintage_quartile",
+    "overall_vintage_score",
+    "overall_vintage_quartile",
+    "vintage_benchmark_label",
+]
+
+_ALLOWED_STRATEGIES = [
+    "buyout",
+    "venture_capital",
+    "growth",
+    "real_assets",
+    "real_estate",
+    "infrastructure",
+    "private_credit",
+    "direct_lending",
+    "secondaries",
+    "fund_of_funds",
+    "co_investment",
+    "special_situations",
+    "distressed_debt",
+    "tactical",
+    "other",
+]
+
+_ALLOWED_GEOGRAPHIES = [
+    "north_america",
+    "europe",
+    "global",
+    "asia_pacific",
+    "emerging_markets",
+    "latin_america",
+    "middle_east",
+    "africa",
+    "other",
+]
+
+def _pdf_slugify(value):
+    value = str(value or "").lower().strip()
+    value = _pdf_re.sub(r"[^a-z0-9]+", "-", value)
+    value = _pdf_re.sub(r"-+", "-", value).strip("-")
+    return value or "unknown"
+
+def _pdf_detect_strategy(text_value):
+    t = str(text_value or "").lower()
+
+    checks = [
+        ("venture_capital", ["venture", "vc"]),
+        ("buyout", ["buyout", "lbo"]),
+        ("growth", ["growth equity", "growth"]),
+        ("real_estate", ["real estate", "property"]),
+        ("infrastructure", ["infrastructure", "infra"]),
+        ("real_assets", ["real assets", "energy", "renewable"]),
+        ("private_credit", ["private credit", "credit"]),
+        ("direct_lending", ["direct lending"]),
+        ("secondaries", ["secondary", "secondaries"]),
+        ("fund_of_funds", ["fund of funds", "fund-of-funds"]),
+        ("co_investment", ["co-invest", "co investment", "co-investment"]),
+        ("special_situations", ["special situations"]),
+        ("distressed_debt", ["distressed"]),
+    ]
+
+    for strategy, keywords in checks:
+        if any(k in t for k in keywords):
+            return strategy
+
+    return "other"
+
+def _pdf_detect_geography(text_value):
+    t = str(text_value or "").lower()
+
+    if any(x in t for x in ["north america", "united states", "u.s.", "usa", "canada"]):
+        return "north_america"
+    if any(x in t for x in ["europe", "european", "uk", "united kingdom", "germany", "france", "nordic"]):
+        return "europe"
+    if any(x in t for x in ["global", "worldwide"]):
+        return "global"
+    if any(x in t for x in ["asia", "apac", "china", "japan", "korea", "india"]):
+        return "asia_pacific"
+    if any(x in t for x in ["emerging markets"]):
+        return "emerging_markets"
+    if any(x in t for x in ["latin america", "latam", "brazil", "mexico"]):
+        return "latin_america"
+
+    return "other"
+
+def _pdf_parse_percent(text_value, labels):
+    t = str(text_value or "")
+    for label in labels:
+        pattern = label + r"[^0-9\-]{0,20}(-?\d+(?:\.\d+)?)\s*%"
+        m = _pdf_re.search(pattern, t, flags=_pdf_re.IGNORECASE)
+        if m:
+            return float(m.group(1)) / 100
+    return None
+
+def _pdf_parse_multiple(text_value, labels):
+    t = str(text_value or "")
+    for label in labels:
+        pattern = label + r"[^0-9]{0,20}(\d+(?:\.\d+)?)\s*x?"
+        m = _pdf_re.search(pattern, t, flags=_pdf_re.IGNORECASE)
+        if m:
+            return float(m.group(1))
+    return None
+
+def _pdf_parse_vintage(text_value):
+    t = str(text_value or "")
+    m = _pdf_re.search(r"\b(19[8-9]\d|20[0-3]\d)\b", t)
+    if m:
+        year = int(m.group(1))
+        if 1980 <= year <= 2035:
+            return year
+    return None
+
+def _pdf_extract_text(uploaded_file):
+    try:
+        import fitz
+    except Exception:
+        st.error("PyMuPDF is not installed. Run: python -m pip install pymupdf")
+        return ""
+
+    pdf_bytes = uploaded_file.read()
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+    pages = []
+    for page in doc:
+        pages.append(page.get_text("text"))
+
+    return "\n".join(pages)
+
+def _pdf_find_candidate_rows(pdf_text, source_name):
+    lines = [x.strip() for x in pdf_text.splitlines() if x.strip()]
+    candidates = []
+
+    fund_keywords = [
+        " fund ",
+        " fund i",
+        " fund ii",
+        " fund iii",
+        " fund iv",
+        " fund v",
+        " fund vi",
+        " fund vii",
+        " partners ",
+        " capital ",
+        " l.p.",
+        " lp",
+    ]
+
+    for i, line in enumerate(lines):
+        low = " " + line.lower() + " "
+
+        if not any(k in low for k in fund_keywords):
+            continue
+
+        if len(line) < 8 or len(line) > 180:
+            continue
+
+        context = " ".join(lines[max(0, i - 4): min(len(lines), i + 6)])
+
+        fund_name = line
+        manager_name = ""
+
+        # Basic manager guess from phrases like "Manager: X" nearby
+        manager_match = _pdf_re.search(r"(manager|sponsor|gp)\s*[:\-]\s*([A-Za-z0-9 &.,'\-]+)", context, flags=_pdf_re.IGNORECASE)
+        if manager_match:
+            manager_name = manager_match.group(2).strip()[:80]
+
+        if not manager_name:
+            # Fallback: use first 2-4 words before Fund/Partners/Capital
+            m = _pdf_re.search(r"^([A-Za-z0-9 &.'\-]{3,60}?)(?:\s+Fund|\s+Partners|\s+Capital)", fund_name)
+            if m:
+                manager_name = m.group(1).strip()
+
+        vintage_year = _pdf_parse_vintage(context)
+        irr = _pdf_parse_percent(context, ["IRR", "Net IRR", "Internal Rate of Return"])
+        tvpi = _pdf_parse_multiple(context, ["TVPI", "Total Value"])
+        dpi = _pdf_parse_multiple(context, ["DPI", "Distributed"])
+
+        strategy = _pdf_detect_strategy(context)
+        geography = _pdf_detect_geography(context)
+
+        fund_id_base = _pdf_slugify(f"{manager_name}-{fund_name}-{vintage_year}")
+        short_hash = _pdf_hashlib.md5(f"{source_name}-{fund_name}-{context}".encode("utf-8")).hexdigest()[:8]
+
+        row = {col: None for col in _ALLOWED_MAIN_COLUMNS}
+
+        row.update({
+            "fund_id": f"pdf-{fund_id_base}-{short_hash}",
+            "fund_name": fund_name,
+            "manager_id": _pdf_slugify(manager_name),
+            "manager_name": manager_name if manager_name else "Needs Review",
+            "vintage_year": vintage_year,
+            "strategy": strategy,
+            "sub_strategy": strategy,
+            "geography": geography,
+            "status": "PDF extracted - needs review",
+            "irr_min": irr,
+            "irr_max": irr,
+            "tvpi_min": tvpi,
+            "tvpi_max": tvpi,
+            "dpi_min": dpi,
+            "dpi_max": dpi,
+            "latest_as_of_date": None,
+            "report_evidence_count": 1,
+            "best_report_confidence": "needs_review",
+            "best_report_evidence_score": 50,
+            "report_sources": source_name,
+            "report_urls": "",
+            "report_mentions": context[:500],
+        })
+
+        candidates.append(row)
+
+    if not candidates:
+        return _pdf_pd.DataFrame(columns=_ALLOWED_MAIN_COLUMNS)
+
+    out = _pdf_pd.DataFrame(candidates)
+
+    # Keep only allowed website columns
+    out = out[[c for c in _ALLOWED_MAIN_COLUMNS if c in out.columns]]
+
+    # Remove exact duplicate fund IDs
+    out = out.drop_duplicates(subset=["fund_id"])
+
+    return out
+
+uploaded_pdf = st.file_uploader(
+    "Drag and drop a PDF here",
+    type=["pdf"],
+    key="pdf_upload_extract_fund_data"
+)
+
+if uploaded_pdf is not None:
+    with st.spinner("Reading PDF and extracting possible fund rows..."):
+        pdf_text = _pdf_extract_text(uploaded_pdf)
+        extracted_df = _pdf_find_candidate_rows(pdf_text, uploaded_pdf.name)
+
+    if extracted_df.empty:
+        st.warning("No likely fund rows found. This PDF may need a more advanced extraction method.")
+    else:
+        st.success(f"Extracted {len(extracted_df)} possible fund rows. Review before adding.")
+
+        review_cols = [
+            "fund_name",
+            "manager_name",
+            "vintage_year",
+            "strategy",
+            "sub_strategy",
+            "geography",
+            "irr_max",
+            "tvpi_max",
+            "dpi_max",
+            "status",
+            "report_sources",
+            "report_mentions",
+        ]
+        review_cols = [c for c in review_cols if c in extracted_df.columns]
+
+        st.dataframe(extracted_df[review_cols], width="stretch", height=350)
+
+        csv_data = extracted_df.to_csv(index=False).encode("utf-8")
+
+        st.download_button(
+            "Download extracted rows as CSV",
+            data=csv_data,
+            file_name="pdf_extracted_fund_rows.csv",
+            mime="text/csv",
+            key="download_pdf_extracted_rows"
+        )
+
+        st.warning(
+            "Approval step: only click append after reviewing. "
+            "This local append updates your local CSV. Public Streamlit Cloud storage is temporary unless connected to a real database."
+        )
+
+        approve_append = st.checkbox(
+            "I reviewed these rows and want to append them to the local dashboard CSV",
+            key="approve_pdf_append"
+        )
+
+        if approve_append:
+            if st.button("Append approved rows to lp_funds_all_with_report_evidence.csv", key="append_pdf_rows"):
+                main_path = _PdfPath("lp_funds_all_with_report_evidence.csv")
+
+                if not main_path.exists():
+                    st.error("Could not find lp_funds_all_with_report_evidence.csv")
+                else:
+                    main_df = _pdf_pd.read_csv(main_path)
+
+                    for col in main_df.columns:
+                        if col not in extracted_df.columns:
+                            extracted_df[col] = None
+
+                    append_df = extracted_df[main_df.columns].copy()
+
+                    combined = _pdf_pd.concat([main_df, append_df], ignore_index=True)
+                    combined = combined.drop_duplicates(subset=["fund_id"], keep="last")
+                    combined.to_csv(main_path, index=False)
+
+                    st.success(
+                        f"Added {len(append_df)} reviewed rows locally. "
+                        "Restart or refresh the app to see them in the screener."
+                    )
+
+# ============================================================
+# END PDF UPLOAD / DATA EXTRACTION TOOL
+# ============================================================
 
