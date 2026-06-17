@@ -1,4 +1,82 @@
 import streamlit as st
+
+
+# ============================================================
+# CLEAN FUND SCREENER DISPLAY TABLES
+# Hide quartile / percentile / vintage benchmark columns
+# ============================================================
+
+_ORIGINAL_ST_DATAFRAME_CLEAN = st.dataframe
+
+def _clean_screener_dataframe(data=None, *args, **kwargs):
+    try:
+        import pandas as _pd
+
+        if isinstance(data, _pd.DataFrame):
+            hidden_keywords = [
+                "quartile",
+                "percentile",
+                "vintage_benchmark_label",
+                "benchmark_result",
+                "peer_funds",
+            ]
+
+            cols_to_hide = []
+            for col in data.columns:
+                col_lower = str(col).lower()
+                if any(word in col_lower for word in hidden_keywords):
+                    cols_to_hide.append(col)
+
+            data = data.drop(columns=cols_to_hide, errors="ignore")
+
+    except Exception:
+        pass
+
+    return _ORIGINAL_ST_DATAFRAME_CLEAN(data, *args, **kwargs)
+
+st.dataframe = _clean_screener_dataframe
+
+# Also clean data editor if the app uses it anywhere
+if hasattr(st, "data_editor"):
+    _ORIGINAL_ST_DATA_EDITOR_CLEAN = st.data_editor
+
+    def _clean_screener_data_editor(data=None, *args, **kwargs):
+        try:
+            import pandas as _pd
+
+            if isinstance(data, _pd.DataFrame):
+                hidden_keywords = [
+                    "quartile",
+                    "percentile",
+                    "vintage_benchmark_label",
+                    "benchmark_result",
+                    "peer_funds",
+                ]
+
+                cols_to_hide = []
+                for col in data.columns:
+                    col_lower = str(col).lower()
+                    if any(word in col_lower for word in hidden_keywords):
+                        cols_to_hide.append(col)
+
+                data = data.drop(columns=cols_to_hide, errors="ignore")
+
+        except Exception:
+            pass
+
+        return _ORIGINAL_ST_DATA_EDITOR_CLEAN(data, *args, **kwargs)
+
+    st.data_editor = _clean_screener_data_editor
+
+# ============================================================
+# END CLEAN FUND SCREENER DISPLAY TABLES
+# ============================================================
+
+
+
+
+
+
 import pandas as pd
 import sqlite3
 import requests
@@ -675,301 +753,8 @@ with tab1:
     # ========================================================
 
     st.divider()
-    st.subheader("Selected Fund vs Vintage Benchmark")
+# Selected Fund vs Vintage Benchmark section removed from front page.
 
-    selected_vintage = selected.get("vintage_year", None)
-
-    if pd.isna(selected_vintage):
-        st.warning("This fund does not have a vintage year, so it cannot be compared to a vintage benchmark.")
-    else:
-        selected_vintage = int(selected_vintage)
-
-        vintage_peer_df = df.copy()
-
-        vintage_peer_df["vintage_year"] = pd.to_numeric(
-            vintage_peer_df["vintage_year"],
-            errors="coerce"
-        )
-
-        for col in ["irr_max", "tvpi_max", "dpi_max"]:
-            if col in vintage_peer_df.columns:
-                vintage_peer_df[col] = pd.to_numeric(vintage_peer_df[col], errors="coerce")
-
-        vintage_peer_df["irr_percent"] = vintage_peer_df["irr_max"].apply(
-            lambda x: x * 100 if pd.notna(x) and x <= 1 else x
-        )
-
-        vintage_peer_df = vintage_peer_df[
-            vintage_peer_df["vintage_year"] == selected_vintage
-        ].copy()
-
-        # Remove extreme values so the benchmark is fairer/readable
-        vintage_peer_df = vintage_peer_df[
-            (
-                vintage_peer_df["irr_percent"].isna() |
-                ((vintage_peer_df["irr_percent"] >= -100) & (vintage_peer_df["irr_percent"] <= 100))
-            )
-            &
-            (
-                vintage_peer_df["tvpi_max"].isna() |
-                ((vintage_peer_df["tvpi_max"] >= 0) & (vintage_peer_df["tvpi_max"] <= 10))
-            )
-            &
-            (
-                vintage_peer_df["dpi_max"].isna() |
-                ((vintage_peer_df["dpi_max"] >= 0) & (vintage_peer_df["dpi_max"] <= 10))
-            )
-        ]
-
-        def percentile_to_quartile(percentile):
-            if pd.isna(percentile):
-                return "N/A"
-            if percentile >= 75:
-                return "Q1"
-            elif percentile >= 50:
-                return "Q2"
-            elif percentile >= 25:
-                return "Q3"
-            else:
-                return "Q4"
-
-        def quartile_to_score(quartile):
-            if quartile == "Q1":
-                return 4
-            elif quartile == "Q2":
-                return 3
-            elif quartile == "Q3":
-                return 2
-            elif quartile == "Q4":
-                return 1
-            return None
-
-        def score_to_overall_quartile(score):
-            if pd.isna(score):
-                return "N/A"
-            if score >= 3.5:
-                return "Q1"
-            elif score >= 2.5:
-                return "Q2"
-            elif score >= 1.5:
-                return "Q3"
-            else:
-                return "Q4"
-
-        def overall_label_from_score(score):
-            if pd.isna(score):
-                return "Not enough data"
-            if score >= 3.7:
-                return "Exceptional vs vintage"
-            elif score >= 3.0:
-                return "Strong / top quartile vs vintage"
-            elif score >= 2.3:
-                return "Above median vs vintage"
-            elif score >= 1.7:
-                return "Below median vs vintage"
-            else:
-                return "Weak vs vintage"
-
-        def vintage_metric_result(metric_name, fund_value, peer_series, higher_is_better=True):
-            peer_series = pd.to_numeric(peer_series, errors="coerce").dropna()
-
-            if pd.isna(fund_value) or peer_series.empty:
-                return {
-                    "metric": metric_name,
-                    "fund_value": None,
-                    "peer_count": len(peer_series),
-                    "average": None,
-                    "median": None,
-                    "p25": None,
-                    "p75": None,
-                    "percentile": None,
-                    "quartile": "N/A",
-                    "label": "Not enough data",
-                }
-
-            fund_value = float(fund_value)
-
-            avg = peer_series.mean()
-            med = peer_series.median()
-            p25 = peer_series.quantile(0.25)
-            p75 = peer_series.quantile(0.75)
-
-            if higher_is_better:
-                percentile = (peer_series <= fund_value).mean() * 100
-            else:
-                percentile = (peer_series >= fund_value).mean() * 100
-
-            quartile = percentile_to_quartile(percentile)
-
-            if percentile >= 90:
-                label = "Exceptional vs vintage"
-            elif percentile >= 75:
-                label = "Q1 / top quartile vs vintage"
-            elif percentile >= 50:
-                label = "Q2 / above median vs vintage"
-            elif percentile >= 25:
-                label = "Q3 / below median vs vintage"
-            else:
-                label = "Q4 / weak vs vintage"
-
-            return {
-                "metric": metric_name,
-                "fund_value": fund_value,
-                "peer_count": len(peer_series),
-                "average": avg,
-                "median": med,
-                "p25": p25,
-                "p75": p75,
-                "percentile": percentile,
-                "quartile": quartile,
-                "label": label,
-            }
-
-        fund_irr_percent = selected.get("irr_max", None)
-
-        if pd.notna(fund_irr_percent):
-            fund_irr_percent = float(fund_irr_percent)
-            if fund_irr_percent <= 1:
-                fund_irr_percent = fund_irr_percent * 100
-
-        benchmark_results = [
-            vintage_metric_result(
-                "IRR (%)",
-                fund_irr_percent,
-                vintage_peer_df["irr_percent"] if "irr_percent" in vintage_peer_df.columns else pd.Series(dtype=float),
-            ),
-            vintage_metric_result(
-                "TVPI",
-                selected.get("tvpi_max", None),
-                vintage_peer_df["tvpi_max"] if "tvpi_max" in vintage_peer_df.columns else pd.Series(dtype=float),
-            ),
-            vintage_metric_result(
-                "DPI",
-                selected.get("dpi_max", None),
-                vintage_peer_df["dpi_max"] if "dpi_max" in vintage_peer_df.columns else pd.Series(dtype=float),
-            ),
-        ]
-
-        result_df = pd.DataFrame(benchmark_results)
-
-        result_df["quartile_score"] = result_df["quartile"].apply(quartile_to_score)
-        valid_scores = result_df["quartile_score"].dropna()
-
-        if valid_scores.empty:
-            overall_score = None
-            overall_vintage_quartile = "N/A"
-            overall_vintage_label = "Not enough data"
-        else:
-            overall_score = valid_scores.mean()
-            overall_vintage_quartile = score_to_overall_quartile(overall_score)
-            overall_vintage_label = overall_label_from_score(overall_score)
-
-        def format_metric_value(metric, value):
-            if pd.isna(value):
-                return "N/A"
-            if metric == "IRR (%)":
-                return f"{float(value):.1f}%"
-            return f"{float(value):.2f}x"
-
-        result_df["Fund Value"] = result_df.apply(
-            lambda r: format_metric_value(r["metric"], r["fund_value"]),
-            axis=1
-        )
-
-        result_df["Vintage Average"] = result_df.apply(
-            lambda r: format_metric_value(r["metric"], r["average"]),
-            axis=1
-        )
-
-        result_df["Vintage Median"] = result_df.apply(
-            lambda r: format_metric_value(r["metric"], r["median"]),
-            axis=1
-        )
-
-        result_df["Vintage 25th Percentile"] = result_df.apply(
-            lambda r: format_metric_value(r["metric"], r["p25"]),
-            axis=1
-        )
-
-        result_df["Vintage 75th Percentile"] = result_df.apply(
-            lambda r: format_metric_value(r["metric"], r["p75"]),
-            axis=1
-        )
-
-        result_df["Vintage Percentile Rank"] = result_df["percentile"].apply(
-            lambda x: "N/A" if pd.isna(x) else f"{x:.1f}%"
-        )
-
-        result_df["Vintage Quartile"] = result_df["quartile"]
-        result_df["Benchmark Result"] = result_df["label"]
-
-        display_cols = [
-            "metric",
-            "Fund Value",
-            "Vintage Average",
-            "Vintage Median",
-            "Vintage 25th Percentile",
-            "Vintage 75th Percentile",
-            "Vintage Percentile Rank",
-            "Vintage Quartile",
-            "Benchmark Result",
-            "peer_count",
-        ]
-
-        result_display = result_df[display_cols].rename(columns={
-            "metric": "Metric",
-            "peer_count": "Peer Funds in Same Vintage",
-        })
-
-        st.write(
-            f"Comparing **{selected.get('fund_name', '')}** against **{len(vintage_peer_df):,} LP Data funds** from vintage **{selected_vintage}**."
-        )
-
-        b1, b2, b3, b4 = st.columns(4)
-
-        irr_row = result_df[result_df["metric"] == "IRR (%)"]
-        tvpi_row = result_df[result_df["metric"] == "TVPI"]
-        dpi_row = result_df[result_df["metric"] == "DPI"]
-
-        if not irr_row.empty:
-            b1.metric(
-                "IRR Vintage Quartile",
-                irr_row.iloc[0]["Vintage Quartile"],
-                irr_row.iloc[0]["Vintage Percentile Rank"]
-            )
-
-        if not tvpi_row.empty:
-            b2.metric(
-                "TVPI Vintage Quartile",
-                tvpi_row.iloc[0]["Vintage Quartile"],
-                tvpi_row.iloc[0]["Vintage Percentile Rank"]
-            )
-
-        if not dpi_row.empty:
-            b3.metric(
-                "DPI Vintage Quartile",
-                dpi_row.iloc[0]["Vintage Quartile"],
-                dpi_row.iloc[0]["Vintage Percentile Rank"]
-            )
-
-        b4.metric(
-            "Overall Vintage Quartile",
-            overall_vintage_quartile,
-            overall_vintage_label
-        )
-
-        st.dataframe(result_display, width="stretch", height=220)
-
-        if overall_vintage_quartile == "Q1":
-            st.success(f"**Overall vintage benchmark result: {overall_vintage_quartile}.** {overall_vintage_label}. This fund is outperforming most same-vintage peers.")
-        elif overall_vintage_quartile == "Q2":
-            st.info(f"**Overall vintage benchmark result: {overall_vintage_quartile}.** {overall_vintage_label}. This fund is above average versus same-vintage peers.")
-        elif overall_vintage_quartile == "Q3":
-            st.warning(f"**Overall vintage benchmark result: {overall_vintage_quartile}.** {overall_vintage_label}. This fund is below the median versus same-vintage peers.")
-        elif overall_vintage_quartile == "Q4":
-            st.error(f"**Overall vintage benchmark result: {overall_vintage_quartile}.** {overall_vintage_label}. This fund is weak versus same-vintage peers.")
-        else:
-            st.warning("Not enough benchmark data to calculate vintage quartiles.")
 
     st.subheader("AI Investment Memo")
 
@@ -1296,7 +1081,37 @@ Clearly distinguish:
 
 
     else:
-        st.markdown(make_allocator_memo(selected, has_inst, manager_row))
+        memo_text = make_allocator_memo(selected, has_inst, manager_row)
+
+        # Clean ONLY the allocator memo text.
+        # Keep the memo, but remove quartile/Q1-Q4 language.
+        import re as _memo_cleaner
+
+        # Remove the single Overall Quartile line.
+        memo_text = _memo_cleaner.sub(
+            r"(?m)^\s*Overall Quartile:.*\n?",
+            "",
+            memo_text
+        )
+
+        # Remove the Quartile Meaning section and its Q1-Q4 bullets only.
+        memo_text = _memo_cleaner.sub(
+            r"(?s)\n?\s*Quartile Meaning\s*\n\s*[-*•]?\s*Q1\s*=.*?\n\s*[-*•]?\s*Q4\s*=.*?(?=\n\s*Institutional Validation|\Z)",
+            "\n",
+            memo_text
+        )
+
+        # Remove any leftover Q1/Q2/Q3/Q4 bullet lines if formatting differs.
+        memo_text = _memo_cleaner.sub(
+            r"(?m)^\s*[-*•]?\s*Q[1-4]\s*=.*\n?",
+            "",
+            memo_text
+        )
+
+        # Remove empty repeated lines.
+        memo_text = _memo_cleaner.sub(r"\n{3,}", "\n\n", memo_text)
+
+        st.markdown(memo_text)
 
 
 # ============================================================
